@@ -1,0 +1,85 @@
+workflows:
+
+  # ── 1. Her push'ta çalışır: analiz + testler ─────────────────────────────
+  flutter-analyze-test:
+    name: Analyze & Test
+    max_build_duration: 30
+    environment:
+      flutter: stable
+    scripts:
+      - name: Get dependencies
+        script: flutter pub get
+      - name: Generate Hive adapters
+        script: dart run build_runner build --delete-conflicting-outputs
+      - name: Analyze
+        script: flutter analyze --no-fatal-infos
+      - name: Test
+        script: flutter test
+    triggering:
+      events:
+        - push
+        - pull_request
+
+  # ── 2. iOS Simulator build (imzasız — her branch) ────────────────────────
+  ios-simulator:
+    name: iOS Simulator Build
+    max_build_duration: 60
+    environment:
+      flutter: stable
+      xcode: latest
+      cocoapods: default
+    scripts:
+      - name: Get dependencies
+        script: flutter pub get
+      - name: Generate Hive adapters
+        script: dart run build_runner build --delete-conflicting-outputs
+      - name: Analyze
+        script: flutter analyze --no-fatal-infos
+      - name: Build iOS (simulator, no codesign)
+        script: flutter build ios --simulator --no-codesign
+    artifacts:
+      - build/ios/iphonesimulator/Runner.app
+    triggering:
+      events:
+        - push
+      branch_patterns:
+        - pattern: main
+          include: true
+
+  # ── 3. iOS Release IPA (imzalı — Apple sertifikası gerekli) ─────────────
+  # Bu workflow'u etkinleştirmek için Codemagic → App Settings →
+  # "iOS code signing" bölümüne Apple Developer sertifika ve
+  # provisioning profile eklemen gerekir.
+  ios-release:
+    name: iOS Release (Signed IPA)
+    max_build_duration: 60
+    environment:
+      flutter: stable
+      xcode: latest
+      cocoapods: default
+      ios_signing:
+        distribution_type: ad_hoc   # veya: app_store
+        bundle_identifier: com.seydabozdag.taskflow
+    scripts:
+      - name: Get dependencies
+        script: flutter pub get
+      - name: Generate Hive adapters
+        script: dart run build_runner build --delete-conflicting-outputs
+      - name: Analyze
+        script: flutter analyze --no-fatal-infos
+      - name: Test
+        script: flutter test
+      - name: Build IPA
+        script: |
+          flutter build ipa \
+            --release \
+            --export-options-plist=/Users/builder/export_options.plist
+    artifacts:
+      - build/ios/ipa/*.ipa
+      - /tmp/xcodebuild_logs/*.log
+    triggering:
+      events:
+        - tag
+      tag_patterns:
+        - pattern: 'v*'
+          include: true

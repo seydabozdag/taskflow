@@ -1,5 +1,8 @@
+import 'package:confetti/confetti.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
+import '../../../../core/constants/app_colors.dart';
 import '../../../../core/constants/app_sizes.dart';
 import '../../../../core/constants/board_view_mode.dart';
 import '../../../../core/theme/theme_context_ext.dart';
@@ -8,14 +11,14 @@ import '../../../../core/utils/responsive.dart';
 import '../../domain/entities/task_entity.dart';
 import '../bloc/task_bloc.dart';
 import '../bloc/task_state.dart';
+import '../widgets/command_palette.dart';
 import '../widgets/kanban_column.dart';
 import '../widgets/priority_list_view.dart';
+import '../widgets/skeleton_board.dart';
 import '../widgets/task_form_sheet.dart';
 import '../widgets/task_ui_extensions.dart';
+import 'stats_page.dart';
 
-/// Board'un kendisi tek bir local state (`BoardViewMode`) taşır — bu saf
-/// bir navigasyon/UI tercihidir, paylaşılan iş verisi değildir, bu yüzden
-/// BLoC'a taşımak gereksiz mimari ağırlık eklerdi.
 class BoardPage extends StatefulWidget {
   const BoardPage({super.key});
 
@@ -25,44 +28,119 @@ class BoardPage extends StatefulWidget {
 
 class _BoardPageState extends State<BoardPage> {
   BoardViewMode _viewMode = BoardViewMode.kanban;
+  late final ConfettiController _confettiController;
+  int _prevDoneCount = 0;
+  bool _initialLoadDone = false;
+  bool _paletteOpen = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _confettiController = ConfettiController(duration: const Duration(seconds: 2));
+  }
+
+  @override
+  void dispose() {
+    _confettiController.dispose();
+    super.dispose();
+  }
+
+  void _openCommandPalette() {
+    if (_paletteOpen) return;
+    _paletteOpen = true;
+    showCommandPalette(
+      context,
+      onNewTask: () => showTaskForm(context),
+      onViewModeChanged: (mode) {
+        if (mounted) setState(() => _viewMode = mode);
+      },
+      onEditTask: (task) => showTaskForm(context, editingTask: task),
+    ).whenComplete(() {
+      if (mounted) _paletteOpen = false;
+    });
+  }
 
   @override
   Widget build(BuildContext context) {
     final isMobile = Responsive.isMobile(context);
     final colors = context.colors;
 
-    return Scaffold(
-      backgroundColor: colors.background,
-      appBar: _BoardAppBar(
-        isMobile: isMobile,
-        viewMode: _viewMode,
-        onViewModeChanged: (mode) => setState(() => _viewMode = mode),
-      ),
-      // Sayfa arka planına çok hafif bir gradient veriyoruz; düz tek renkten
-      // daha "premium" bir his veriyor ama yine de göz yormuyor. Renkler
-      // context.colors'tan geldiği için dark temada otomatik uyumlu olur.
-      body: Container(
-        decoration: BoxDecoration(
-          gradient: LinearGradient(
-            begin: Alignment.topCenter,
-            end: Alignment.bottomCenter,
-            colors: [colors.background, colors.backgroundEnd],
-          ),
+    return Focus(
+      autofocus: true,
+      canRequestFocus: true,
+      onKeyEvent: (_, event) {
+        if (event is KeyDownEvent &&
+            event.logicalKey == LogicalKeyboardKey.keyK &&
+            (HardwareKeyboard.instance.isControlPressed ||
+                HardwareKeyboard.instance.isMetaPressed)) {
+          _openCommandPalette();
+          return KeyEventResult.handled;
+        }
+        return KeyEventResult.ignored;
+      },
+      child: Scaffold(
+        backgroundColor: colors.background,
+        appBar: _BoardAppBar(
+          isMobile: isMobile,
+          viewMode: _viewMode,
+          onViewModeChanged: (mode) => setState(() => _viewMode = mode),
+          onCommandPalette: _openCommandPalette,
         ),
-        child: SafeArea(
-          child: BlocBuilder<TaskBloc, TaskState>(
-            builder: (context, state) {
-              return switch (state) {
-                TaskInitial() || TaskLoading() =>
-                  const Center(child: CircularProgressIndicator()),
-                TaskError(:final message) => Center(child: Text(message)),
-                TaskLoaded() => switch (_viewMode) {
-                    BoardViewMode.priorityList => PriorityListView(tasks: state.tasks),
-                    BoardViewMode.kanban =>
-                      isMobile ? _MobileBoard(state: state) : _DesktopBoard(state: state),
-                  },
-              };
-            },
+        body: Container(
+          decoration: BoxDecoration(
+            gradient: LinearGradient(
+              begin: Alignment.topCenter,
+              end: Alignment.bottomCenter,
+              colors: [colors.background, colors.backgroundEnd],
+            ),
+          ),
+          child: SafeArea(
+            child: BlocConsumer<TaskBloc, TaskState>(
+              listenWhen: (_, curr) => curr is TaskLoaded,
+              listener: (_, state) {
+                if (state is TaskLoaded) {
+                  final doneCount = state.tasksByStatus(TaskStatus.done).length;
+                  if (_initialLoadDone && doneCount > _prevDoneCount) {
+                    _confettiController.play();
+                  }
+                  _prevDoneCount = doneCount;
+                  _initialLoadDone = true;
+                }
+              },
+              builder: (context, state) {
+                return Stack(
+                  children: [
+                    switch (state) {
+                      TaskInitial() || TaskLoading() => const SkeletonBoard(),
+                      TaskError(:final message) => Center(child: Text(message)),
+                      TaskLoaded() => switch (_viewMode) {
+                          BoardViewMode.stats => StatsPage(tasks: state.tasks),
+                          BoardViewMode.priorityList => PriorityListView(tasks: state.tasks),
+                          BoardViewMode.kanban => isMobile
+                              ? _MobileBoard(state: state)
+                              : _DesktopBoard(state: state),
+                        },
+                    },
+                    // Confetti fires from the top-center on done transitions
+                    Align(
+                      alignment: Alignment.topCenter,
+                      child: IgnorePointer(
+                        child: ConfettiWidget(
+                          confettiController: _confettiController,
+                          blastDirectionality: BlastDirectionality.explosive,
+                          numberOfParticles: 22,
+                          maxBlastForce: 14,
+                          minBlastForce: 5,
+                          gravity: 0.2,
+                          emissionFrequency: 0.06,
+                          colors: AppColors.labelPalette,
+                        ),
+                      ),
+                    ),
+                  ],
+                );
+              },
+            ),
           ),
         ),
       ),
@@ -70,17 +148,19 @@ class _BoardPageState extends State<BoardPage> {
   }
 }
 
-/// Üst bar: marka rozeti + başlık, sağda görünüm anahtarı + tema anahtarı +
-/// görev ekleme aksiyonu. Dar ekranda metin etiketleri ikon-only'e düşer.
+// ---------- AppBar ----------
+
 class _BoardAppBar extends StatelessWidget implements PreferredSizeWidget {
   final bool isMobile;
   final BoardViewMode viewMode;
   final ValueChanged<BoardViewMode> onViewModeChanged;
+  final VoidCallback onCommandPalette;
 
   const _BoardAppBar({
     required this.isMobile,
     required this.viewMode,
     required this.onViewModeChanged,
+    required this.onCommandPalette,
   });
 
   @override
@@ -114,6 +194,15 @@ class _BoardAppBar extends StatelessWidget implements PreferredSizeWidget {
         const SizedBox(width: AppSizes.xs),
         const _ThemeToggleButton(),
         const SizedBox(width: AppSizes.xs),
+        if (!isMobile)
+          Tooltip(
+            message: 'Komut Paleti (Ctrl+K)',
+            child: IconButton(
+              onPressed: onCommandPalette,
+              icon: const Icon(Icons.search_rounded, size: 20),
+            ),
+          ),
+        const SizedBox(width: AppSizes.xs),
         Padding(
           padding: const EdgeInsets.only(right: AppSizes.lg),
           child: isMobile
@@ -146,7 +235,8 @@ class _BoardAppBar extends StatelessWidget implements PreferredSizeWidget {
   Size get preferredSize => const Size.fromHeight(kToolbarHeight);
 }
 
-/// Kanban ↔ Öncelik Listesi geçişi için ikon-only segmented control.
+// ---------- View mode switch ----------
+
 class _ViewModeSwitch extends StatelessWidget {
   final BoardViewMode viewMode;
   final ValueChanged<BoardViewMode> onChanged;
@@ -169,6 +259,11 @@ class _ViewModeSwitch extends StatelessWidget {
           icon: Icon(Icons.sort_rounded, size: 18),
           tooltip: 'Öncelik listesi',
         ),
+        ButtonSegment(
+          value: BoardViewMode.stats,
+          icon: Icon(Icons.bar_chart_rounded, size: 18),
+          tooltip: 'İstatistikler',
+        ),
       ],
       selected: {viewMode},
       onSelectionChanged: (selection) => onChanged(selection.first),
@@ -176,8 +271,8 @@ class _ViewModeSwitch extends StatelessWidget {
   }
 }
 
-/// Açık/koyu tema anahtarı — `ThemeCubit`'in mevcut değerine göre
-/// güneş/ay ikonu arasında geçiş yapar.
+// ---------- Theme toggle ----------
+
 class _ThemeToggleButton extends StatelessWidget {
   const _ThemeToggleButton();
 
@@ -199,9 +294,8 @@ class _ThemeToggleButton extends StatelessWidget {
   }
 }
 
-/// Masaüstü: üstte özet başlık + ilerleme çubuğu, altında yatay scroll
-/// ile yan yana sütunlar. Çok geniş ekranlarda board'un aşırı yayılmasını
-/// `maxContentWidth` ile sınırlandırıyoruz.
+// ---------- Desktop board ----------
+
 class _DesktopBoard extends StatelessWidget {
   final TaskLoaded state;
 
@@ -223,10 +317,6 @@ class _DesktopBoard extends StatelessWidget {
             children: [
               _BoardSummary(total: total, done: done),
               const SizedBox(height: AppSizes.lg),
-              // KanbanColumn içindeki Expanded(ListView), sınırlı bir
-              // yükseklik gerektirir. SingleChildScrollView bunu sağlamadığı
-              // için Expanded + LayoutBuilder ile mevcut alanın tam
-              // yüksekliğini Row'a açıkça veriyoruz.
               Expanded(
                 child: LayoutBuilder(
                   builder: (context, constraints) {
@@ -258,8 +348,6 @@ class _DesktopBoard extends StatelessWidget {
   }
 }
 
-/// Board'un üstündeki özet şeridi: toplam/tamamlanan görev sayısı + ince
-/// bir ilerleme çubuğu. Sade ama "gerçek bir SaaS panosu" hissini güçlendirir.
 class _BoardSummary extends StatelessWidget {
   final int total;
   final int done;
@@ -308,9 +396,8 @@ class _BoardSummary extends StatelessWidget {
   }
 }
 
-/// Mobil: tek seferde bir sütun, üstte pill-style sekme + swipe ile geçiş.
-/// Trello/Jira mobil uygulamalarının izlediği yaklaşım — dar ekranda
-/// 3 sütunu yan yana sıkıştırmak yerine odağı tek sütuna verir.
+// ---------- Mobile board ----------
+
 class _MobileBoard extends StatefulWidget {
   final TaskLoaded state;
 
@@ -346,9 +433,7 @@ class _MobileBoardState extends State<_MobileBoard> {
           padding: const EdgeInsets.fromLTRB(AppSizes.md, AppSizes.sm, AppSizes.md, AppSizes.xs),
           child: _SegmentedTabBar(
             currentIndex: _currentIndex,
-            counts: [
-              for (final s in TaskStatus.values) widget.state.tasksByStatus(s).length,
-            ],
+            counts: [for (final s in TaskStatus.values) widget.state.tasksByStatus(s).length],
             onTap: _goToPage,
           ),
         ),
@@ -359,12 +444,7 @@ class _MobileBoardState extends State<_MobileBoard> {
             children: [
               for (final status in TaskStatus.values)
                 Padding(
-                  padding: const EdgeInsets.fromLTRB(
-                    AppSizes.md,
-                    AppSizes.xs,
-                    AppSizes.md,
-                    AppSizes.md,
-                  ),
+                  padding: const EdgeInsets.fromLTRB(AppSizes.md, AppSizes.xs, AppSizes.md, AppSizes.md),
                   child: KanbanColumn(
                     status: status,
                     tasks: widget.state.tasksByStatus(status),
@@ -380,9 +460,6 @@ class _MobileBoardState extends State<_MobileBoard> {
   }
 }
 
-/// iOS tarzı, kayan arka planlı segmented control. Aktif sekme dolgu
-/// renkli bir "pill" ile vurgulanır ve seçim değiştiğinde bu pill
-/// yumuşakça kayar.
 class _SegmentedTabBar extends StatelessWidget {
   final int currentIndex;
   final List<int> counts;
@@ -414,7 +491,6 @@ class _SegmentedTabBar extends StatelessWidget {
 
           return Stack(
             children: [
-              // Kayan, aktif sekmeyi işaretleyen dolgu pill.
               AnimatedAlign(
                 duration: const Duration(milliseconds: 220),
                 curve: Curves.easeOutCubic,

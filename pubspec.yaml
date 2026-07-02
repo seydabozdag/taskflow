@@ -46,10 +46,13 @@ dependencies:
   hive_flutter: ^1.1.0
 
   # --- UTILS ---
-  # uuid: Her görev için benzersiz ID üretmek için.
   uuid: ^4.5.1
-  # intl: Tarih formatlama için.
   intl: ^0.19.0
+
+  # --- UI ENHANCEMENTS ---
+  confetti: ^0.7.0
+  fl_chart: ^0.68.0
+  shimmer: ^3.0.0
 
 dev_dependencies:
   flutter_test:

@@ -1,20 +1,17 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:intl/intl.dart';
+import '../../../../core/constants/app_colors.dart';
 import '../../../../core/constants/app_sizes.dart';
 import '../../../../core/theme/app_shadows.dart';
 import '../../../../core/theme/theme_context_ext.dart';
+import '../../../../core/utils/responsive.dart';
 import '../../domain/entities/task_entity.dart';
+import '../bloc/task_bloc.dart';
+import '../bloc/task_event.dart';
 import 'task_actions_menu.dart';
 import 'task_ui_extensions.dart';
 
-/// Bir görevi temsil eden kart.
-///
-/// Draggable ile sarmalanır — KanbanColumn içindeki DragTarget'lar
-/// bu kartın taşıdığı TaskEntity'yi (data parametresi) yakalar.
-///
-/// StatefulWidget: hover durumunu (masaüstünde fare üzerine gelince
-/// hafif yükselme efekti) tutmak için local state gerekiyor. Bu state
-/// sadece bu kartı ilgilendiriyor — BLoC'a taşınmaz.
 class TaskCard extends StatefulWidget {
   final TaskEntity task;
 
@@ -29,12 +26,54 @@ class _TaskCardState extends State<TaskCard> {
 
   @override
   Widget build(BuildContext context) {
+    final isMobile = Responsive.isMobile(context);
     final labelColor = Color(widget.task.labelColor);
+
+    final cardChild = MouseRegion(
+      onEnter: (_) => setState(() => _isHovered = true),
+      onExit: (_) => setState(() => _isHovered = false),
+      child: AnimatedSlide(
+        duration: const Duration(milliseconds: 150),
+        offset: _isHovered ? const Offset(0, -0.015) : Offset.zero,
+        child: _Card(task: widget.task, labelColor: labelColor, elevated: _isHovered),
+      ),
+    );
+
+    if (isMobile) {
+      return Dismissible(
+        key: ValueKey('dismissible-${widget.task.id}'),
+        direction: DismissDirection.horizontal,
+        background: const _SwipeBg(
+          color: AppColors.statusDone,
+          icon: Icons.check_circle_outline_rounded,
+          label: 'Tamamla',
+          alignment: Alignment.centerLeft,
+        ),
+        secondaryBackground: const _SwipeBg(
+          color: AppColors.priorityCritical,
+          icon: Icons.delete_outline_rounded,
+          label: 'Sil',
+          alignment: Alignment.centerRight,
+        ),
+        confirmDismiss: (direction) async {
+          final bloc = context.read<TaskBloc>();
+          if (direction == DismissDirection.endToStart) {
+            final confirmed = await _confirmDelete(context);
+            if (confirmed == true) bloc.add(TaskDeleted(taskId: widget.task.id));
+            return false;
+          }
+          // startToEnd → complete
+          if (widget.task.status != TaskStatus.done) {
+            bloc.add(TaskMoved(taskId: widget.task.id, newStatus: TaskStatus.done));
+          }
+          return false;
+        },
+        child: cardChild,
+      );
+    }
 
     return Draggable<TaskEntity>(
       data: widget.task,
-      // Sürüklerken imlecin altında görünen, hafif eğik "kaldırılmış kart"
-      // hissi veren önizleme — Trello'nun fiziksel kart metaforuna yakın.
       feedback: Material(
         color: Colors.transparent,
         child: SizedBox(
@@ -45,22 +84,69 @@ class _TaskCardState extends State<TaskCard> {
           ),
         ),
       ),
-      // Orijinal konumda kalan, kartın "boşluğunu" işaret eden hayalet yer.
       childWhenDragging: _GhostSlot(labelColor: labelColor),
-      child: MouseRegion(
-        onEnter: (_) => setState(() => _isHovered = true),
-        onExit: (_) => setState(() => _isHovered = false),
-        child: AnimatedSlide(
-          duration: const Duration(milliseconds: 150),
-          offset: _isHovered ? const Offset(0, -0.015) : Offset.zero,
-          child: _Card(task: widget.task, labelColor: labelColor, elevated: _isHovered),
+      child: cardChild,
+    );
+  }
+
+  Future<bool?> _confirmDelete(BuildContext context) => showDialog<bool>(
+    context: context,
+    builder: (ctx) => AlertDialog(
+      title: const Text('Görevi sil?'),
+      content: Text('"${widget.task.title}" kalıcı olarak silinecek.'),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(ctx).pop(false),
+          child: const Text('Vazgeç'),
         ),
+        FilledButton(
+          onPressed: () => Navigator.of(ctx).pop(true),
+          style: FilledButton.styleFrom(backgroundColor: AppColors.priorityCritical),
+          child: const Text('Sil'),
+        ),
+      ],
+    ),
+  );
+}
+
+class _SwipeBg extends StatelessWidget {
+  final Color color;
+  final IconData icon;
+  final String label;
+  final AlignmentGeometry alignment;
+
+  const _SwipeBg({
+    required this.color,
+    required this.icon,
+    required this.label,
+    required this.alignment,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final isRight = alignment == Alignment.centerRight;
+    return Container(
+      alignment: alignment,
+      color: color,
+      padding: const EdgeInsets.symmetric(horizontal: AppSizes.lg),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: isRight
+            ? [
+                Text(label, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w600)),
+                const SizedBox(width: AppSizes.xs),
+                Icon(icon, color: Colors.white, size: 22),
+              ]
+            : [
+                Icon(icon, color: Colors.white, size: 22),
+                const SizedBox(width: AppSizes.xs),
+                Text(label, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w600)),
+              ],
       ),
     );
   }
 }
 
-/// Sürüklenirken kartın eski yerinde kalan, kesik çizgili boş yuva.
 class _GhostSlot extends StatelessWidget {
   final Color labelColor;
 
@@ -79,8 +165,6 @@ class _GhostSlot extends StatelessWidget {
   }
 }
 
-/// Kartın görsel gövdesi. Draggable'ın hem normal hem feedback
-/// görünümünde aynı görsel dili paylaşmaları için ayrı bir widget.
 class _Card extends StatelessWidget {
   final TaskEntity task;
   final Color labelColor;
@@ -94,15 +178,12 @@ class _Card extends StatelessWidget {
     final priority = task.priority;
     final radius = BorderRadius.circular(AppSizes.cardBorderRadius);
 
-    // NOT: Flutter, farklı kalınlıklarda kenarlığa sahip bir `Border` ile
-    // `borderRadius`'u AYNI ANDA kullanmaya izin vermez (paint anında
-    // FlutterError fırlatır — flutter analyze bunu yakalayamaz, kart
-    // sessizce çizilmez). Bu yüzden sol "etiket rengi" şeridini bir border
-    // yerine ayrı, dar bir Container olarak Row'un başına ekliyoruz; dış
-    // kenarlık tek tip (uniform) kalıyor.
     return AnimatedContainer(
       duration: const Duration(milliseconds: 150),
-      decoration: BoxDecoration(borderRadius: radius, boxShadow: elevated ? AppShadows.lg : AppShadows.sm),
+      decoration: BoxDecoration(
+        borderRadius: radius,
+        boxShadow: elevated ? AppShadows.lg : AppShadows.sm,
+      ),
       child: ClipRRect(
         borderRadius: radius,
         child: Container(
@@ -114,12 +195,7 @@ class _Card extends StatelessWidget {
                 Container(width: 3, color: labelColor),
                 Expanded(
                   child: Padding(
-                    padding: const EdgeInsets.fromLTRB(
-                      AppSizes.md,
-                      AppSizes.sm,
-                      AppSizes.xs,
-                      AppSizes.sm,
-                    ),
+                    padding: const EdgeInsets.fromLTRB(AppSizes.md, AppSizes.sm, AppSizes.xs, AppSizes.sm),
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
@@ -128,11 +204,7 @@ class _Card extends StatelessWidget {
                           children: [
                             Padding(
                               padding: const EdgeInsets.only(top: 2),
-                              child: TaskIconBadge(
-                                iconType: task.iconType,
-                                color: labelColor,
-                                size: 28,
-                              ),
+                              child: TaskIconBadge(iconType: task.iconType, color: labelColor, size: 28),
                             ),
                             const SizedBox(width: AppSizes.sm),
                             Expanded(
@@ -169,11 +241,7 @@ class _Card extends StatelessWidget {
                             runSpacing: AppSizes.xs,
                             crossAxisAlignment: WrapCrossAlignment.center,
                             children: [
-                              _Badge(
-                                color: priority.color,
-                                label: priority.label,
-                                icon: priority.icon,
-                              ),
+                              _Badge(color: priority.color, label: priority.label, icon: priority.icon),
                               if (task.dueDate != null) _DueDateBadge(task: task),
                             ],
                           ),
@@ -225,7 +293,6 @@ class _Badge extends StatelessWidget {
   }
 }
 
-/// Son tarih rozeti — gecikmişse kırmızı, bugünse amber, normalse nötr renkte.
 class _DueDateBadge extends StatelessWidget {
   final TaskEntity task;
 
